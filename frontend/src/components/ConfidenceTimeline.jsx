@@ -14,7 +14,7 @@ function toneColor(t, alpha = 1) {
 }
 
 export default function ConfidenceTimeline() {
-  const { result, status } = useAnalysis();
+  const { result, status, currentPage } = useAnalysis();
 
   if (status === 'loading' || (!result && status !== 'idle')) {
     return (
@@ -33,7 +33,15 @@ export default function ConfidenceTimeline() {
     );
   }
 
-  if (status === 'idle' || !result?.timeline) {
+  // Prefer the active page's timeline; fall back to the top-level one
+  // for legacy single-page responses.
+  const pages = Array.isArray(result?.pages) && result.pages.length > 0 ? result.pages : null;
+  const safeIndex = pages ? Math.min(Math.max(0, currentPage || 0), pages.length - 1) : 0;
+  const activePage = pages ? pages[safeIndex] : null;
+  const pageBands = activePage?.timeline;
+  const bands = (pageBands && pageBands.length > 0) ? pageBands : result?.timeline;
+
+  if (status === 'idle' || !bands) {
     return (
       <div className="conf-strip">
         <h4>CONFIDENCE TIMELINE</h4>
@@ -43,8 +51,6 @@ export default function ConfidenceTimeline() {
       </div>
     );
   }
-
-  const bands = result.timeline;
 
   return (
     <div className="conf-strip fade-up">
@@ -76,7 +82,7 @@ export default function ConfidenceTimeline() {
       </div>
       <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border-soft)',
                     fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-faint)', letterSpacing: '0.1em' }}>
-        {bands.length} / {bands.length} STRIPS · ENSEMBLE READY
+        {bands.length} / {bands.length} STRIPS · {pages ? `PAGE ${safeIndex + 1}/${pages.length} · ` : ''}ENSEMBLE READY
       </div>
     </div>
   );

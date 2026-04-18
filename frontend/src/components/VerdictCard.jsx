@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useAnalysis } from '../context/AnalysisContext.jsx';
 import { OrbMesh, ErrorBanner } from './FX.jsx';
+import { exportReportPdf } from '../utils/exportPdf.js';
 
 function useCountUp(target, duration = 1400, enabled = true) {
   const [val, setVal] = useState(0);
@@ -29,6 +30,15 @@ export default function VerdictCard() {
   const { result, status, file, error, retry } = useAnalysis();
   const confidence = result ? result.confidence * 100 : 0;
   const animatedPct = useCountUp(confidence, 1400, status === 'success' && !!result);
+  const [exporting, setExporting] = useState(false);
+
+  const handleExport = async () => {
+    if (!result || exporting) return;
+    setExporting(true);
+    try { await exportReportPdf(result); }
+    catch (e) { /* eslint-disable-next-line no-console */ console.warn('PDF export failed', e); }
+    finally { setExporting(false); }
+  };
 
   if (status === 'error') {
     return <ErrorBanner message={error} onRetry={retry} />;
@@ -63,10 +73,30 @@ export default function VerdictCard() {
   return (
     <div className="verdict-hero fade-up">
       <div className={`verdict-card ${style.cls}`}>
-        <div className="verdict-meta">
+        <div className="verdict-meta" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span className={`badge ${style.badge}`}>{style.overall}</span>
           <span className="badge">{style.severity}</span>
           {file?.name && <span className="badge">{file.name}</span>}
+          <button type="button"
+                  onClick={handleExport}
+                  disabled={exporting}
+                  style={{
+                    marginLeft: 'auto',
+                    background: 'transparent',
+                    color: exporting ? 'var(--text-faint)' : 'var(--cyan)',
+                    border: '1px solid rgba(79,195,247,0.45)',
+                    borderRadius: 8,
+                    padding: '6px 14px',
+                    cursor: exporting ? 'wait' : 'pointer',
+                    fontFamily: 'var(--mono)',
+                    fontSize: 10,
+                    letterSpacing: '0.16em',
+                    textTransform: 'uppercase',
+                    boxShadow: exporting ? 'none' : '0 0 12px rgba(79,195,247,0.18)',
+                    transition: 'all 150ms ease',
+                  }}>
+            {exporting ? 'EXPORTING…' : '↓ EXPORT REPORT'}
+          </button>
         </div>
         <div className="verdict-label">VERDICT</div>
         <div className="verdict-word">{result.verdict}</div>

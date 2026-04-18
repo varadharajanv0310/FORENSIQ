@@ -141,7 +141,7 @@ def ocr_only(req: OcrRequest):
 
         filename = (req.filename or "").strip() or _sniff_filename(data)
         input_path = _save_upload(data, filename)
-        image_path, _original_url, _page_info = _prepare_image(input_path, filename)
+        image_path, _original_url, _page_info, _pages = _prepare_image(input_path, filename)
 
         ocr = run_ocr(image_path)
         return {"regional_language": ocr}
@@ -179,7 +179,7 @@ def adversarial_apply(req: AdversarialRequest):
         # Step 3: save + prepare (rasterize PDFs, validate images).
         input_path = _save_upload(data, filename)
         try:
-            image_path, _original_url, page_info = _prepare_image(input_path, filename)
+            image_path, _original_url, page_info, _pages = _prepare_image(input_path, filename)
         except HTTPException:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -241,21 +241,28 @@ def _sniff_filename(data: bytes) -> str:
 
 def _run_full_pipeline(data: bytes, filename: str) -> Dict:
     input_path = _save_upload(data, filename)
-    image_path, original_url, page_info = _prepare_image(input_path, filename)
+    image_path, original_url, page_info, pages_assets = _prepare_image(input_path, filename)
     return _pipeline_from_image(
         image_path=image_path,
         original_url=original_url,
         filename=filename,
         raw_bytes=data,
         page_info=page_info,
+        pages_assets=pages_assets,
     )
 
 
 def _pipeline_from_image(image_path: str, original_url: str, filename: str,
-                         raw_bytes: bytes, page_info: Dict) -> Dict:
+                         raw_bytes: bytes, page_info: Dict,
+                         pages_assets: Optional[list] = None) -> Dict:
     start = time.time()
     is_pdf = filename.lower().endswith(".pdf")
 
+    if not pages_assets:
+        pages_assets = [{"page_number": 1, "image_path": image_path, "original_url": original_url}]
+
+    # Primary signals run on page 1 only — CNN / font / metadata / OCR are
+    # either expensive or document-level rather than page-level.
     ela = compute_ela(image_path, HEATMAP_DIR)
     cnn = cnn_predict(image_path)
     grad = _raw_gradcam(image_path, HEATMAP_DIR)
@@ -284,8 +291,43 @@ def _pipeline_from_image(image_path: str, original_url: str, filename: str,
     verdict = classify(score)
     reason = generate_reason(signals, verdict, weights)
     timeline = build_timeline(ela, num_strips=10)
-    elapsed_ms = int((time.time() - start) * 1000)
 
+    # Build per-page ELA + GradCAM. Page 1 reuses the computation above so
+    # we don't redo it; subsequent pages get their own ELA + GradCAM pass.
+    pages: list = [{
+        "page_number": pages_assets[0]["page_number"],
+        "gradcam_url": grad.get("heatmap_url"),
+        "ela_heatmap_url": ela.get("heatmap_url"),
+        "timeline": timeline,
+        "confidence": float(ela.get("score", 0.0)),
+        "original_url": pages_assets[0]["original_url"],
+        "bounding_boxes": grad.get("bounding_boxes", []),
+    }]
+    for asset in pages_assets[1:]:
+        page_img = asset["image_path"]
+        log.info("pipeline · processing page %d (%s)", asset["page_number"], os.path.basename(page_img))
+        try:
+            page_ela = compute_ela(page_img, HEATMAP_DIR)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("page %d ELA failed", asset["page_number"])
+            page_ela = {"score": 0.0, "confidence": 0.0, "regional_scores": [],
+                        "heatmap_url": None}
+        try:
+            page_grad = _raw_gradcam(page_img, HEATMAP_DIR)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("page %d GradCAM failed", asset["page_number"])
+            page_grad = {"heatmap_url": None, "bounding_boxes": []}
+        pages.append({
+            "page_number": asset["page_number"],
+            "gradcam_url": page_grad.get("heatmap_url"),
+            "ela_heatmap_url": page_ela.get("heatmap_url"),
+            "timeline": build_timeline(page_ela, num_strips=10),
+            "confidence": float(page_ela.get("score", 0.0)),
+            "original_url": asset["original_url"],
+            "bounding_boxes": page_grad.get("bounding_boxes", []),
+        })
+
+    elapsed_ms = int((time.time() - start) * 1000)
     sha256 = hashlib.sha256(raw_bytes).hexdigest() if raw_bytes else ""
 
     return {
@@ -300,6 +342,8 @@ def _pipeline_from_image(image_path: str, original_url: str, filename: str,
         "original_url": original_url,
         "regional_language": ocr,
         "timeline": timeline,
+        "pages": pages,
+        "bounding_boxes": grad.get("bounding_boxes", []),
         "elapsed_ms": elapsed_ms,
         "sha256": sha256,
         "page_info": page_info,
@@ -329,6 +373,14 @@ def filename_to_original(filename: str, current_path: str) -> str:
 
 
 def _prepare_image(input_path: str, filename: str):
+    """Rasterize the input (PDF → PNG per page) and publish originals.
+
+    Returns ``(image_path, original_url, page_info, pages_assets)`` where
+    ``pages_assets`` is a list of ``{page_number, image_path, original_url}``
+    entries (one per page for PDFs, or a single entry for images). The
+    first three return values always refer to page 1 for backwards
+    compatibility with the single-page pipeline.
+    """
     is_pdf = filename.lower().endswith(".pdf")
     page_info: Dict = {
         "format": filename.split(".")[-1].upper() if "." in filename else "BIN",
@@ -337,22 +389,34 @@ def _prepare_image(input_path: str, filename: str):
         "size_kb": round(os.path.getsize(input_path) / 1024, 1),
     }
 
+    pages_assets: list = []
+
     if is_pdf:
         if fitz is None:
             raise HTTPException(status_code=500, detail="PyMuPDF (fitz) is not installed — cannot render PDF.")
         try:
             doc = fitz.open(input_path)
             page_info["total_pages"] = doc.page_count
-            page = doc.load_page(0)
-            pix = page.get_pixmap(dpi=220)
-            image_path = os.path.splitext(input_path)[0] + ".png"
-            pix.save(image_path)
+            stem = os.path.splitext(input_path)[0]
+            for idx in range(doc.page_count):
+                page = doc.load_page(idx)
+                pix = page.get_pixmap(dpi=220)
+                page_png = f"{stem}_p{idx + 1}.png"
+                pix.save(page_png)
+                page_original_url = _publish_original(page_png, f"{filename}#p{idx + 1}")
+                pages_assets.append({
+                    "page_number": idx + 1,
+                    "image_path": page_png,
+                    "original_url": page_original_url,
+                })
             doc.close()
             # Keep a side-car copy of the PDF so metadata checks can still read it.
-            pdf_copy = os.path.splitext(input_path)[0] + ".pdf"
+            pdf_copy = stem + ".pdf"
             if pdf_copy != input_path:
                 shutil.copy(input_path, pdf_copy)
             page_info["format"] = "PDF"
+            image_path = pages_assets[0]["image_path"]
+            original_url = pages_assets[0]["original_url"]
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=f"Failed to render PDF: {exc}") from exc
     else:
@@ -361,9 +425,14 @@ def _prepare_image(input_path: str, filename: str):
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=f"Invalid image: {exc}") from exc
         image_path = input_path
+        original_url = _publish_original(image_path, filename)
+        pages_assets.append({
+            "page_number": 1,
+            "image_path": image_path,
+            "original_url": original_url,
+        })
 
-    original_url = _publish_original(image_path, filename)
-    return image_path, original_url, page_info
+    return image_path, original_url, page_info, pages_assets
 
 
 def _publish_original(image_path: str, filename: str) -> str:

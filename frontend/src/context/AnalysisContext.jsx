@@ -23,11 +23,26 @@ export function AnalysisProvider({ children }) {
   const [status, setStatus] = useState('idle'); // 'idle' | 'loading' | 'success' | 'error'
   const [error, setError] = useState(null);
   const [stepIndex, setStepIndex] = useState(-1);
+  // Current page index (0-based) for multi-page PDFs. Purely a view-state
+  // value — changing it never fires /analyze, it just re-selects which
+  // entry from result.pages the Forensics Viewer + Timeline render.
+  const [currentPage, setCurrentPage] = useState(0);
+
+  // Session-scoped history for the confidence-history chart. One entry
+  // per successful /analyze. Resets only on page reload.
+  const [history, setHistory] = useState([]);
+
+  // Batch-mode state for multi-file upload.
+  const [batchMode, setBatchMode] = useState(false);
+  const [batchResults, setBatchResults] = useState([]); // [{ id, filename, status, result?, error? }]
+  const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0, running: false });
 
   const lastFileRef = useRef(null);
   const lastBase64Ref = useRef(null);
   const lastFilenameRef = useRef(null);
   const lastAttackRef = useRef(null); // { operation, intensity }
+  const batchFilesRef = useRef([]);
+  const historyIdRef = useRef(0);
 
   const animateSteps = useCallback((apiPromise) => {
     let cancelled = false;
@@ -51,6 +66,19 @@ export function AnalysisProvider({ children }) {
     return () => { cancelled = true; clearInterval(interval); };
   }, []);
 
+  const pushHistoryEntry = useCallback((data, sourceFile) => {
+    if (!data) return;
+    historyIdRef.current += 1;
+    const entry = {
+      id: historyIdRef.current,
+      filename: sourceFile?.name || data.filename || 'document',
+      verdict: data.verdict || 'GENUINE',
+      confidence: typeof data.confidence === 'number' ? data.confidence : 0,
+      timestamp: new Date().toISOString(),
+    };
+    setHistory((prev) => [...prev, entry]);
+  }, []);
+
   const runAnalyze = useCallback(async (chosenFile) => {
     if (!chosenFile) return;
     setFile(chosenFile);
@@ -58,6 +86,7 @@ export function AnalysisProvider({ children }) {
     setError(null);
     setResult(null);
     setBaseline(null);
+    setCurrentPage(0);
     lastFileRef.current = chosenFile;
     lastFilenameRef.current = chosenFile.name || null;
     try {
@@ -72,12 +101,13 @@ export function AnalysisProvider({ children }) {
       setResult(data);
       setBaseline(data);
       setStatus('success');
+      pushHistoryEntry(data, chosenFile);
     } catch (e) {
       setError(e.message || 'Analysis failed');
       setStatus('error');
       setStepIndex(-1);
     }
-  }, [animateSteps]);
+  }, [animateSteps, pushHistoryEntry]);
 
   const runAdversarial = useCallback(async (operation, intensity) => {
     if (!lastBase64Ref.current) {
@@ -147,6 +177,91 @@ export function AnalysisProvider({ children }) {
     runRegionalOcr();
   }, [runRegionalOcr]);
 
+  // Batch pipeline: analyze 2–10 files sequentially, update a row-by-row
+  // results table, and push each successful result into the session
+  // history. The currently-selected "active" document in the rest of the
+  // UI is the first successful file until the user clicks a row.
+  const runBatch = useCallback(async (files) => {
+    const list = Array.from(files || []).slice(0, 10);
+    if (list.length < 2) return; // batch mode requires at least 2 files
+    const initial = list.map((f, i) => ({
+      id: `${Date.now()}-${i}`,
+      filename: f.name || `file_${i + 1}`,
+      status: 'pending',
+      result: null,
+      error: null,
+    }));
+    batchFilesRef.current = list;
+    setBatchResults(initial);
+    setBatchProgress({ current: 0, total: list.length, running: true });
+    setError(null);
+
+    // Show the spinner on the main panel for the first file.
+    setStatus('loading');
+    setResult(null);
+    setBaseline(null);
+    setCurrentPage(0);
+
+    let firstOk = null;
+    for (let i = 0; i < list.length; i += 1) {
+      const f = list[i];
+      setBatchProgress({ current: i + 1, total: list.length, running: true });
+      setBatchResults((prev) => prev.map((row, idx) =>
+        idx === i ? { ...row, status: 'analyzing' } : row
+      ));
+      try {
+        const data = await analyzeDocument(f);
+        setBatchResults((prev) => prev.map((row, idx) =>
+          idx === i ? { ...row, status: 'done', result: data } : row
+        ));
+        pushHistoryEntry(data, f);
+        if (firstOk === null) {
+          firstOk = { file: f, data };
+          setFile(f);
+          setResult(data);
+          setBaseline(data);
+          lastFileRef.current = f;
+          lastFilenameRef.current = f.name || null;
+          try { lastBase64Ref.current = await fileToBase64(f); } catch (_) { lastBase64Ref.current = null; }
+          setStatus('success');
+        }
+      } catch (e) {
+        setBatchResults((prev) => prev.map((row, idx) =>
+          idx === i ? { ...row, status: 'error', error: e.message || 'Analysis failed' } : row
+        ));
+      }
+    }
+    setBatchProgress((prev) => ({ ...prev, running: false }));
+    if (firstOk === null) {
+      setError('All batch documents failed');
+      setStatus('error');
+    }
+  }, [pushHistoryEntry]);
+
+  const loadBatchResult = useCallback(async (id) => {
+    const row = batchResults.find((r) => r.id === id);
+    if (!row || row.status !== 'done' || !row.result) return;
+    const idx = batchResults.findIndex((r) => r.id === id);
+    const sourceFile = idx >= 0 ? batchFilesRef.current[idx] : null;
+    setResult(row.result);
+    setBaseline(row.result);
+    setStatus('success');
+    setError(null);
+    setCurrentPage(0);
+    if (sourceFile) {
+      setFile(sourceFile);
+      lastFileRef.current = sourceFile;
+      lastFilenameRef.current = sourceFile.name || null;
+      try { lastBase64Ref.current = await fileToBase64(sourceFile); } catch (_) { lastBase64Ref.current = null; }
+    }
+  }, [batchResults]);
+
+  const clearBatch = useCallback(() => {
+    setBatchResults([]);
+    setBatchProgress({ current: 0, total: 0, running: false });
+    batchFilesRef.current = [];
+  }, []);
+
   const reset = useCallback(() => {
     setFile(null);
     setResult(null);
@@ -154,6 +269,7 @@ export function AnalysisProvider({ children }) {
     setStatus('idle');
     setError(null);
     setStepIndex(-1);
+    setCurrentPage(0);
     lastFileRef.current = null;
     lastBase64Ref.current = null;
     lastFilenameRef.current = null;
@@ -162,11 +278,18 @@ export function AnalysisProvider({ children }) {
 
   const value = useMemo(() => ({
     file, result, baseline, status, error, stepIndex,
+    currentPage, setCurrentPage,
+    history,
+    batchMode, setBatchMode,
+    batchResults, batchProgress,
+    runBatch, loadBatchResult, clearBatch,
     steps: PIPELINE_STEPS,
     runAnalyze, runAdversarial, runRegionalOcr,
     retry, retryStress, retryRegional,
     reset,
-  }), [file, result, baseline, status, error, stepIndex,
+  }), [file, result, baseline, status, error, stepIndex, currentPage,
+      history, batchMode, batchResults, batchProgress,
+      runBatch, loadBatchResult, clearBatch,
       runAnalyze, runAdversarial, runRegionalOcr,
       retry, retryStress, retryRegional, reset]);
 

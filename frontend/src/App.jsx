@@ -7,6 +7,8 @@ import ForensicsViewer from './components/ForensicsViewer.jsx';
 import VerdictCard from './components/VerdictCard.jsx';
 import ConfidenceTimeline from './components/ConfidenceTimeline.jsx';
 import MultiSignalReport from './components/MultiSignalReport.jsx';
+import BatchResultsTable from './components/BatchResultsTable.jsx';
+import ConfidenceHistory from './components/ConfidenceHistory.jsx';
 import AdversarialPanel from './components/AdversarialPanel.jsx';
 import RegionalLanguagePanel from './components/RegionalLanguagePanel.jsx';
 import { Backdrop, ErrorBanner } from './components/FX.jsx';
@@ -21,6 +23,7 @@ function ScreenAnalysis() {
         <UploadZone />
         {status === 'error' && <ErrorBanner message={error} onRetry={retry} />}
         <ForensicsViewer />
+        <BatchResultsTable />
       </div>
       <ConfidenceTimeline />
     </div>
@@ -51,6 +54,7 @@ function ScreenVerdict() {
         </div>
 
         <VerdictCard />
+        <ConfidenceHistory />
         <div style={{ height: 24 }} />
         <MultiSignalReport />
       </div>
