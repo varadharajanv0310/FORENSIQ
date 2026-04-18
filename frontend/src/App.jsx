@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import Navbar from './components/Navbar.jsx';
 import HeroSection from './components/HeroSection.jsx';
 import UploadZone from './components/UploadZone.jsx';
@@ -68,8 +68,15 @@ function AppInner() {
 
   const { status } = useAnalysis();
 
+  // Auto-advance to the verdict screen only on the loading→success edge
+  // of a fresh /analyze run. Revisiting the Analyze tab with a persisted
+  // success state must NOT trigger another redirect, or the cached
+  // heatmap will flash and vanish.
+  const prevStatusRef = useRef(status);
   useEffect(() => {
-    if (status === 'success' && screen === 'analysis') {
+    const prev = prevStatusRef.current;
+    prevStatusRef.current = status;
+    if (prev === 'loading' && status === 'success' && screen === 'analysis') {
       const t = setTimeout(() => setScreen('verdict'), 900);
       return () => clearTimeout(t);
     }

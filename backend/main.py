@@ -21,15 +21,18 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import logging
 import os
 import random
 import shutil
 import time
+import traceback
 import uuid
 from typing import Dict, Optional
 
 import numpy as np
 from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageEnhance
@@ -53,6 +56,9 @@ from utils.report import (
     generate_reason,
     select_weights,
 )
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("forensiq")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMP_DIR = os.path.join(BASE_DIR, "temp")
@@ -109,37 +115,128 @@ async def analyze(file: UploadFile = File(...)) -> Dict:
     return _run_full_pipeline(data, filename)
 
 
-@app.post("/adversarial/apply")
-def adversarial_apply(req: AdversarialRequest) -> Dict:
+class OcrRequest(BaseModel):
+    file_base64: str = Field(..., description="Base64-encoded PDF or image bytes.")
+    filename: Optional[str] = None
+
+
+@app.post("/ocr")
+def ocr_only(req: OcrRequest):
+    """Run just the OCR / regional-script pipeline on the supplied document.
+    Used by the Regional Forensics tab's retry button so it doesn't have
+    to re-run the full ELA+CNN+GradCAM ensemble."""
+    log.info("ocr_only start · filename=%s base64_len=%d", req.filename, len(req.file_base64 or ""))
     try:
-        data = base64.b64decode(req.file_base64)
+        payload = (req.file_base64 or "").strip()
+        if payload.startswith("data:"):
+            comma = payload.find(",")
+            if comma >= 0:
+                payload = payload[comma + 1:]
+        try:
+            data = base64.b64decode(payload, validate=False)
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse(status_code=400, content={"detail": f"Invalid base64: {exc}"})
+        if not data:
+            return JSONResponse(status_code=400, content={"detail": "Empty base64 payload"})
+
+        filename = (req.filename or "").strip() or _sniff_filename(data)
+        input_path = _save_upload(data, filename)
+        image_path, _original_url, _page_info = _prepare_image(input_path, filename)
+
+        ocr = run_ocr(image_path)
+        return {"regional_language": ocr}
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=f"Invalid base64: {exc}") from exc
-    if not data:
-        raise HTTPException(status_code=400, detail="Empty base64 payload")
+        log.exception("ocr_only crashed")
+        return JSONResponse(status_code=500, content={"detail": f"OCR failed: {exc}"})
 
-    filename = req.filename or f"attacked_{uuid.uuid4().hex}.bin"
-    input_path = _save_upload(data, filename)
-    image_path, original_url, page_info = _prepare_image(input_path, filename)
 
-    modified_path = _apply_attack(image_path, req.operation, float(req.intensity))
-    modified_filename = f"adv_{os.path.basename(modified_path)}"
+@app.post("/adversarial/apply")
+def adversarial_apply(req: AdversarialRequest):
+    log.info("adversarial_apply start · op=%s intensity=%.3f filename=%s base64_len=%d",
+             req.operation, float(req.intensity), req.filename, len(req.file_base64 or ""))
+    try:
+        # Step 1: decode base64 (tolerate whitespace / data URI prefix)
+        payload = (req.file_base64 or "").strip()
+        if payload.startswith("data:"):
+            comma = payload.find(",")
+            if comma >= 0:
+                payload = payload[comma + 1:]
+        try:
+            data = base64.b64decode(payload, validate=False)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("base64 decode failed")
+            return JSONResponse(status_code=400, content={"detail": f"Invalid base64: {exc}"})
+        if not data:
+            return JSONResponse(status_code=400, content={"detail": "Empty base64 payload"})
+        log.info("adversarial_apply decoded %d bytes", len(data))
 
-    with open(modified_path, "rb") as fh:
-        modified_bytes = fh.read()
-    modified_b64 = base64.b64encode(modified_bytes).decode("ascii")
+        # Step 2: derive a sane filename so _prepare_image routes PDFs/images correctly.
+        filename = (req.filename or "").strip() or _sniff_filename(data)
+        log.info("adversarial_apply using filename=%s", filename)
 
-    result = _pipeline_from_image(
-        image_path=modified_path,
-        original_url=_publish_original(modified_path, modified_filename),
-        filename=modified_filename,
-        raw_bytes=modified_bytes,
-        page_info={**page_info, "format": "PNG", "size_kb": round(len(modified_bytes) / 1024, 1)},
-    )
-    result["modified_image_base64"] = modified_b64
-    result["source_operation"] = req.operation
-    result["source_intensity"] = float(req.intensity)
-    return result
+        # Step 3: save + prepare (rasterize PDFs, validate images).
+        input_path = _save_upload(data, filename)
+        try:
+            image_path, _original_url, page_info = _prepare_image(input_path, filename)
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.exception("prepare_image failed")
+            return JSONResponse(status_code=400, content={"detail": f"Could not open document: {exc}"})
+
+        # Step 4: apply the perturbation BEFORE re-running the pipeline.
+        try:
+            modified_path = _apply_attack(image_path, req.operation, float(req.intensity))
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.exception("apply_attack failed for op=%s", req.operation)
+            return JSONResponse(status_code=500, content={"detail": f"Attack '{req.operation}' failed: {exc}"})
+        log.info("adversarial_apply attack produced %s", modified_path)
+
+        modified_filename = f"adv_{os.path.basename(modified_path)}"
+        with open(modified_path, "rb") as fh:
+            modified_bytes = fh.read()
+        modified_b64 = base64.b64encode(modified_bytes).decode("ascii")
+
+        # Step 5: re-run the full pipeline on the attacked image.
+        try:
+            result = _pipeline_from_image(
+                image_path=modified_path,
+                original_url=_publish_original(modified_path, modified_filename),
+                filename=modified_filename,
+                raw_bytes=modified_bytes,
+                page_info={**page_info, "format": "PNG", "size_kb": round(len(modified_bytes) / 1024, 1)},
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("pipeline failed after attack")
+            return JSONResponse(status_code=500, content={"detail": f"Re-analysis failed: {exc}"})
+
+        result["modified_image_base64"] = modified_b64
+        result["source_operation"] = req.operation
+        result["source_intensity"] = float(req.intensity)
+        log.info("adversarial_apply done · verdict=%s conf=%.3f", result.get("verdict"), result.get("confidence", 0.0))
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.error("adversarial_apply crashed: %s\n%s", exc, traceback.format_exc())
+        return JSONResponse(status_code=500, content={"detail": f"Server error: {exc}"})
+
+
+def _sniff_filename(data: bytes) -> str:
+    """Guess an extension from magic bytes when no filename is supplied."""
+    if len(data) >= 4 and data[:4] == b"%PDF":
+        return f"attacked_{uuid.uuid4().hex}.pdf"
+    if len(data) >= 8 and data[:8] == b"\x89PNG\r\n\x1a\n":
+        return f"attacked_{uuid.uuid4().hex}.png"
+    if len(data) >= 3 and data[:3] == b"\xff\xd8\xff":
+        return f"attacked_{uuid.uuid4().hex}.jpg"
+    if len(data) >= 4 and data[:4] in (b"II*\x00", b"MM\x00*"):
+        return f"attacked_{uuid.uuid4().hex}.tif"
+    return f"attacked_{uuid.uuid4().hex}.png"
 
 
 def _run_full_pipeline(data: bytes, filename: str) -> Dict:

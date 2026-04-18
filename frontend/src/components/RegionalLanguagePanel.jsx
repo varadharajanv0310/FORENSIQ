@@ -12,7 +12,7 @@ const SCRIPT_NATIVE = {
 };
 
 export default function RegionalLanguagePanel() {
-  const { result, status, error, retry } = useAnalysis();
+  const { result, status, error, retryRegional } = useAnalysis();
   const [activeScript, setActiveScript] = useState('');
 
   const rl = result?.regional_language;
@@ -46,7 +46,7 @@ export default function RegionalLanguagePanel() {
               <h2>Indic script integrity</h2>
             </div>
           </div>
-          <ErrorBanner message={error} onRetry={retry} />
+          <ErrorBanner message={error} onRetry={retryRegional} />
         </div>
       </div>
     );

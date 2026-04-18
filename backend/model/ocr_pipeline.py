@@ -1,17 +1,22 @@
 """OCR + regional-script forensics.
 
-Runs EasyOCR across six scripts (English, Tamil, Hindi, Telugu, Kannada,
-Malayalam), detects the dominant script from Unicode code-point ranges,
-and for each line computes the median character width/height ratio.
-Characters whose metrics deviate more than 30% from the line median are
-flagged — a classic signal of heterogeneous glyph sources stitched into
-a single line.
+EasyOCR forbids stacking most Indic scripts in a single Reader, so we
+maintain a per-script reader pool. A cheap English+Hindi pass runs first
+(``hi`` shares Devanagari with many fallback fonts and coexists with
+``en``); if the detected script differs, we lazily spin up a dedicated
+Reader for that script and re-run. For each OCR line we compute the
+median character width/height ratio and flag glyphs whose metrics
+deviate more than 30% — a classic signal of heterogeneous glyph sources
+stitched into a single line.
 """
 from __future__ import annotations
 
+import logging
 from typing import Dict, List, Optional
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 SCRIPT_RANGES = {
     "tamil":     (0x0B80, 0x0BFF),
@@ -21,18 +26,37 @@ SCRIPT_RANGES = {
     "malayalam": (0x0D00, 0x0D7F),
 }
 
-LANGS = ["en", "ta", "hi", "te", "kn", "ml"]
+# EasyOCR language code per detected script. English always pairs cleanly.
+SCRIPT_TO_LANG = {
+    "english":   ["en"],
+    "hindi":     ["hi", "en"],
+    "tamil":     ["ta", "en"],
+    "telugu":    ["te", "en"],
+    "kannada":   ["kn", "en"],
+    "malayalam": ["ml", "en"],
+}
+
 DEVIATION_THRESHOLD = 0.30
 
-_READER = None
+_READERS: Dict[str, object] = {}
 
 
-def _get_reader():
-    global _READER
-    if _READER is None:
-        import easyocr
-        _READER = easyocr.Reader(LANGS, gpu=False, verbose=False)
-    return _READER
+def _reader_for(script: str):
+    """Lazy, per-script EasyOCR Reader. Falls back to English on init failure."""
+    langs = SCRIPT_TO_LANG.get(script, ["en"])
+    key = "+".join(langs)
+    if key in _READERS:
+        return _READERS[key]
+    import easyocr
+    try:
+        reader = easyocr.Reader(langs, gpu=False, verbose=False)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("EasyOCR init failed for %s (%s); falling back to English.", key, exc)
+        if "en" not in _READERS:
+            _READERS["en"] = easyocr.Reader(["en"], gpu=False, verbose=False)
+        reader = _READERS["en"]
+    _READERS[key] = reader
+    return reader
 
 
 def detect_script(text: str) -> str:
@@ -70,18 +94,37 @@ def _char_box_height(bbox) -> float:
 
 
 def run_ocr(image_path: str) -> Dict:
+    # Pass 1: English reader (always available) to get some text and
+    # sniff the dominant Unicode script from the raw characters.
     try:
-        reader = _get_reader()
+        first = _reader_for("english")
     except Exception as exc:  # noqa: BLE001
+        log.exception("OCR init failed")
         return _empty_result(error=f"OCR init failed: {exc}")
 
     try:
-        raw = reader.readtext(image_path)
+        raw = first.readtext(image_path)
     except Exception as exc:  # noqa: BLE001
+        log.exception("OCR pass 1 failed on %s", image_path)
         return _empty_result(error=f"OCR failed: {exc}")
 
+    first_text = " ".join([r[1] for r in raw]) if raw else ""
+    script = detect_script(first_text)
+
+    # Pass 2: if a non-English Indic script was detected, re-run with the
+    # dedicated script reader so glyphs are actually recognized rather
+    # than mangled through the English model.
+    if script != "english":
+        try:
+            specific = _reader_for(script)
+            raw2 = specific.readtext(image_path)
+            if raw2:
+                raw = raw2
+        except Exception as exc:  # noqa: BLE001
+            log.warning("OCR pass 2 for %s failed: %s", script, exc)
+
     full_text = " ".join([r[1] for r in raw]) if raw else ""
-    script = detect_script(full_text)
+    script = detect_script(full_text) if full_text else script
 
     ocr_lines: List[Dict] = []
     flagged_characters: List[Dict] = []

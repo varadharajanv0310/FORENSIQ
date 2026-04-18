@@ -19,11 +19,20 @@ export async function analyzeDocument(file) {
   return handleResponse(res);
 }
 
-export async function applyAdversarial(fileBase64, operation, intensity) {
+export async function applyAdversarial(fileBase64, operation, intensity, filename) {
   const res = await fetch(`${BASE_URL}/adversarial/apply`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ file_base64: fileBase64, operation, intensity }),
+    body: JSON.stringify({ file_base64: fileBase64, operation, intensity, filename }),
+  });
+  return handleResponse(res);
+}
+
+export async function runOcr(fileBase64, filename) {
+  const res = await fetch(`${BASE_URL}/ocr`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file_base64: fileBase64, filename }),
   });
   return handleResponse(res);
 }

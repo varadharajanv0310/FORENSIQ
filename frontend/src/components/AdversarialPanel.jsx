@@ -33,7 +33,7 @@ function verdictTone(v) {
 }
 
 export default function AdversarialPanel() {
-  const { baseline, result, status, error, runAdversarial, retry } = useAnalysis();
+  const { baseline, result, status, error, runAdversarial, retryStress } = useAnalysis();
   const [intensities, setIntensities] = useState({ brightness: 35, jpeg_compress: 60, copymove: 20 });
   const [activeOp, setActiveOp] = useState('copymove');
 
@@ -68,7 +68,7 @@ export default function AdversarialPanel() {
           </div>
         )}
 
-        {status === 'error' && <div style={{ marginBottom: 20 }}><ErrorBanner message={error} onRetry={retry} /></div>}
+        {status === 'error' && <div style={{ marginBottom: 20 }}><ErrorBanner message={error} onRetry={retryStress} /></div>}
 
         <div className="stress-banner">
           <div className="stress-banner-title">STRESS TEST MODE · {hasBase ? 'ACTIVE' : 'STANDBY'}</div>
