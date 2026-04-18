@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:api.anthropic.com)",
+      "Bash(unzip -o FORENSIQ.zip -d extracted_frontend)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('main.py'\\).read\\(\\)\\); print\\('main.py OK'\\)\")",
+      "Bash(python -c \"import ast; [ast.parse\\(open\\(f'model/{m}'\\).read\\(\\)\\) for m in ['ela.py','inference.py','gradcam.py','font_analysis.py','metadata_check.py','ocr_pipeline.py','train.py']]; print\\('model/* OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('utils/report.py'\\).read\\(\\)\\); print\\('utils/report.py OK'\\)\")",
+      "Bash(npm --version)",
+      "Bash(npm install *)",
+      "Bash(python -m pip install --upgrade pip)"
+    ]
+  }
+}
