@@ -9,3 +9,5 @@ build/
 .DS_Store
 data/archive/
 *.zip
+backend/static/
+backend/temp/

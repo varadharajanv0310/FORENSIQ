@@ -38,6 +38,20 @@ function statusLabel(row) {
   return { label: row.status?.toUpperCase?.() || '—', color: 'var(--text-dim)' };
 }
 
+function formatTimestamp(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  return [d.getHours(), d.getMinutes(), d.getSeconds()]
+    .map((n) => String(n).padStart(2, '0')).join(':');
+}
+
+function formatDuration(startedAt, finishedAt) {
+  if (!startedAt || !finishedAt) return '—';
+  const ms = Math.max(0, finishedAt - startedAt);
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(2)}s`;
+}
+
 export default function BatchResultsTable({ onRowClick }) {
   const { batchResults, batchProgress, loadBatchResult, clearBatch } = useAnalysis();
 
@@ -100,15 +114,24 @@ export default function BatchResultsTable({ onRowClick }) {
         }}>
           <thead>
             <tr style={{ background: 'rgba(255,255,255,0.02)' }}>
-              {['FILENAME', 'VERDICT', 'CONFIDENCE', 'HIGHEST SIGNAL', 'STATUS'].map((h) => (
-                <th key={h}
+              {[
+                { label: 'FILENAME',       className: '' },
+                { label: 'VERDICT',        className: '' },
+                { label: 'CONFIDENCE',     className: '' },
+                { label: 'HIGHEST SIGNAL', className: '' },
+                { label: 'TIMESTAMP',      className: 'batch-table-col-extra' },
+                { label: 'PROC. TIME',     className: 'batch-table-col-extra' },
+                { label: 'STATUS',         className: '' },
+              ].map((h) => (
+                <th key={h.label}
+                    className={h.className}
                     style={{
                       textAlign: 'left', padding: '10px 14px',
                       color: 'var(--text-faint)', letterSpacing: '0.14em',
                       fontSize: 10, fontWeight: 500,
                       borderBottom: '1px solid var(--border-soft)',
                     }}>
-                  {h}
+                  {h.label}
                 </th>
               ))}
             </tr>
@@ -121,10 +144,22 @@ export default function BatchResultsTable({ onRowClick }) {
               const conf = result ? `${(result.confidence * 100).toFixed(1)}%` : '—';
               const sig = result ? highestSignal(result) : '—';
               const clickable = row.status === 'done';
+              const ts = formatTimestamp(row.finishedAt || row.startedAt);
+              const dur = formatDuration(row.startedAt, row.finishedAt);
               return (
                 <tr key={row.id}
                     onClick={() => handleRowClick(row)}
-                    className="fade-up"
+                    onKeyDown={(e) => {
+                      if (!clickable) return;
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        handleRowClick(row);
+                      }
+                    }}
+                    className="fade-up batch-table-row"
+                    tabIndex={clickable ? 0 : -1}
+                    role={clickable ? 'button' : undefined}
+                    aria-label={clickable ? `Load ${row.filename} results` : undefined}
                     style={{
                       animationDelay: `${i * 60}ms`,
                       cursor: clickable ? 'pointer' : 'default',
@@ -147,6 +182,14 @@ export default function BatchResultsTable({ onRowClick }) {
                   </td>
                   <td style={{ padding: '10px 14px', color: v.color }}>{conf}</td>
                   <td style={{ padding: '10px 14px', color: 'var(--text-dim)' }}>{sig}</td>
+                  <td className="batch-table-col-extra"
+                      style={{ padding: '10px 14px', color: 'var(--text-faint)', fontSize: 11, letterSpacing: '0.08em' }}>
+                    {ts}
+                  </td>
+                  <td className="batch-table-col-extra"
+                      style={{ padding: '10px 14px', color: 'var(--text-dim)', fontSize: 11 }}>
+                    {dur}
+                  </td>
                   <td style={{ padding: '10px 14px' }}>
                     <span style={{
                       color: s.color,

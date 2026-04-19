@@ -109,6 +109,39 @@ export default function VerdictCard() {
             ensemble confidence · {agreeing} of {signalCount} signals flagged
           </div>
         </div>
+
+        {/* FIX 4 — at >1800px the verdict card has room for an inline
+            breakdown of each forensic signal so reviewers don't need to
+            scroll to the MultiSignalReport just for a quick check. */}
+        {result.signals && (
+          <div className="verdict-card-signals-inline" aria-hidden="false">
+            {Object.entries(result.signals).map(([key, sig]) => {
+              const score = Math.round((sig?.score || 0) * 100);
+              const conf = Math.round((sig?.confidence || 0) * 100);
+              const flagged = (sig?.score || 0) > 0.4;
+              return (
+                <div key={key}
+                     style={{
+                       padding: '8px 12px',
+                       border: `1px solid ${flagged ? 'rgba(245,127,23,0.35)' : 'var(--border-soft)'}`,
+                       borderRadius: 8,
+                       background: flagged ? 'rgba(245,127,23,0.08)' : 'rgba(255,255,255,0.02)',
+                       fontFamily: 'var(--mono)',
+                       fontSize: 11, letterSpacing: '0.06em',
+                       color: 'var(--text-dim)',
+                       display: 'flex', alignItems: 'center', gap: 8,
+                     }}>
+                  <span style={{
+                    color: flagged ? '#FFD180' : 'var(--text)',
+                    letterSpacing: '0.14em', fontWeight: 600,
+                  }}>{key.toUpperCase()}</span>
+                  <span style={{ color: 'var(--text)' }}>{score}%</span>
+                  <span style={{ color: 'var(--text-faint)' }}>c{conf}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       <div className="orb-card">

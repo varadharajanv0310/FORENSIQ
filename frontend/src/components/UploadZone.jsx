@@ -28,6 +28,11 @@ export default function UploadZone({ onUploaded, compact = false }) {
       return;
     }
     setLocalErr(null);
+    // FIX 2: fire onUploaded BEFORE awaiting the analyze/batch promise
+    // so the host screen (HeroSection etc.) flips to the analysis view
+    // immediately and ProcessingLog becomes visible while the first
+    // network call is still in flight.
+    if (onUploaded) onUploaded();
     if (batchMode) {
       if (files.length < BATCH_MIN) {
         setLocalErr(`Batch mode requires at least ${BATCH_MIN} files`);
@@ -41,7 +46,6 @@ export default function UploadZone({ onUploaded, compact = false }) {
     } else {
       await runAnalyze(files[0]);
     }
-    if (onUploaded) onUploaded();
   }, [batchMode, runAnalyze, runBatch, onUploaded]);
 
   const onDrop = (e) => {

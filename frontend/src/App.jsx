@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect } from 'react';
 import Navbar from './components/Navbar.jsx';
 import HeroSection from './components/HeroSection.jsx';
 import UploadZone from './components/UploadZone.jsx';
@@ -9,12 +9,16 @@ import ConfidenceTimeline from './components/ConfidenceTimeline.jsx';
 import MultiSignalReport from './components/MultiSignalReport.jsx';
 import BatchResultsTable from './components/BatchResultsTable.jsx';
 import ConfidenceHistory from './components/ConfidenceHistory.jsx';
+import VerdictProceedAction from './components/VerdictProceedAction.jsx';
+import BatchDocumentSelector from './components/BatchDocumentSelector.jsx';
 import AdversarialPanel from './components/AdversarialPanel.jsx';
 import RegionalLanguagePanel from './components/RegionalLanguagePanel.jsx';
+import KeyboardShortcutsModal from './components/KeyboardShortcutsModal.jsx';
 import { Backdrop, ErrorBanner } from './components/FX.jsx';
 import { AnalysisProvider, useAnalysis } from './context/AnalysisContext.jsx';
+import useKeyboardShortcuts from './hooks/useKeyboardShortcuts.js';
 
-function ScreenAnalysis() {
+function AnalysisBlock() {
   const { status, error, retry } = useAnalysis();
   return (
     <div className="analysis">
@@ -24,17 +28,20 @@ function ScreenAnalysis() {
         {status === 'error' && <ErrorBanner message={error} onRetry={retry} />}
         <ForensicsViewer />
         <BatchResultsTable />
+        {/* Prominent CTA between analysis + verdict — only renders
+            once a successful result is available. */}
+        <VerdictProceedAction />
       </div>
       <ConfidenceTimeline />
     </div>
   );
 }
 
-function ScreenVerdict() {
+function VerdictBlock() {
   const { result, file } = useAnalysis();
   const ts = new Date().toUTCString().replace(/ GMT/, ' UTC');
   return (
-    <div className="verdict-wrap">
+    <div className="verdict-wrap" id="verdict-anchor">
       <div className="horizon-glow red" style={{ bottom: '-400px', opacity: 0.55 }} />
       <div className="container">
         <div className="section-header">
@@ -53,6 +60,9 @@ function ScreenVerdict() {
           </div>
         </div>
 
+        {/* FIX 6: per-document chip row — hidden when batch count < 2 */}
+        <BatchDocumentSelector />
+
         <VerdictCard />
         <ConfidenceHistory />
         <div style={{ height: 24 }} />
@@ -62,40 +72,54 @@ function ScreenVerdict() {
   );
 }
 
+// FIX 3: merged analysis + verdict into a single scrollable container.
+// - When status !== 'success' we still show the analysis block so the
+//   user has a page to interact with during loading/error.
+// - When status === 'success' we render VerdictBlock immediately below,
+//   with an anchor so the "PROCEED" button can smooth-scroll to it.
+// - Whichever screen the user is on ('analysis' or 'verdict') renders
+//   the same unified layout; the 'verdict' screen just auto-scrolls to
+//   the anchor on mount so the Navbar tab still feels like it took the
+//   user somewhere.
+function UnifiedScreen() {
+  const { screen, status } = useAnalysis();
+
+  useEffect(() => {
+    if (screen !== 'verdict') return;
+    if (status !== 'success') return;
+    // Run after paint so the anchor node definitely exists.
+    const t = setTimeout(() => {
+      const anchor = document.getElementById('verdict-anchor');
+      if (anchor) anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 40);
+    return () => clearTimeout(t);
+  }, [screen, status]);
+
+  return (
+    <>
+      <AnalysisBlock />
+      {status === 'success' && <VerdictBlock />}
+    </>
+  );
+}
+
 function AppInner() {
-  const [screen, setScreen] = useState(() => {
-    try { return localStorage.getItem('forensiq.screen') || 'landing'; } catch (e) { return 'landing'; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem('forensiq.screen', screen); } catch (e) { /* noop */ }
-  }, [screen]);
+  const { screen, setScreen } = useAnalysis();
 
-  const { status } = useAnalysis();
-
-  // Auto-advance to the verdict screen only on the loading→success edge
-  // of a fresh /analyze run. Revisiting the Analyze tab with a persisted
-  // success state must NOT trigger another redirect, or the cached
-  // heatmap will flash and vanish.
-  const prevStatusRef = useRef(status);
-  useEffect(() => {
-    const prev = prevStatusRef.current;
-    prevStatusRef.current = status;
-    if (prev === 'loading' && status === 'success' && screen === 'analysis') {
-      const t = setTimeout(() => setScreen('verdict'), 900);
-      return () => clearTimeout(t);
-    }
-  }, [status, screen]);
+  // FIX 5: wire global + analysis + verdict keyboard shortcuts.
+  useKeyboardShortcuts();
 
   return (
     <div className="app">
       <Backdrop />
-      <Navbar screen={screen} setScreen={setScreen} />
+      <Navbar />
 
       {screen === 'landing'  && <HeroSection onEnterApp={() => setScreen('analysis')} />}
-      {screen === 'analysis' && <ScreenAnalysis />}
-      {screen === 'verdict'  && <ScreenVerdict />}
+      {(screen === 'analysis' || screen === 'verdict') && <UnifiedScreen />}
       {screen === 'stress'   && <AdversarialPanel />}
       {screen === 'regional' && <RegionalLanguagePanel />}
+
+      <KeyboardShortcutsModal />
     </div>
   );
 }

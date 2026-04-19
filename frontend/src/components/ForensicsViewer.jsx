@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useAnalysis } from '../context/AnalysisContext.jsx';
 import { resolveAssetUrl } from '../services/api.js';
 import { ErrorBanner } from './FX.jsx';
@@ -7,13 +7,20 @@ import { ErrorBanner } from './FX.jsx';
 // data is pulled directly from result.pages[currentPage] — navigating
 // pages mutates only the local state.currentPage value via context and
 // never fires a network request.
+//
+// FIX 4: the blend slider state is lifted into AnalysisContext so the
+// keyboard shortcut hook (Shift+↑ / ] / Shift+↓ / [) can drive it.
+// Bounding-box coordinates are recomputed on every container resize via
+// a ResizeObserver so the overlay stays aligned when the grid reflows.
 export default function ForensicsViewer() {
-  const { result, status, file, error, retry, currentPage, setCurrentPage } = useAnalysis();
-  const [blend, setBlend] = useState(50);
-  const [overlay, setOverlay] = useState('gradcam'); // 'gradcam' | 'ela'
+  const {
+    result, status, file, error, retry, currentPage, setCurrentPage,
+    blend, setBlend, overlay, setOverlay,
+  } = useAnalysis();
   const [imgDims, setImgDims] = useState({ naturalW: 0, naturalH: 0, renderedW: 0, renderedH: 0 });
   const [boxesAnimated, setBoxesAnimated] = useState(0); // index-inclusive
   const imgRef = useRef(null);
+  const containerRef = useRef(null);
 
   const pages = Array.isArray(result?.pages) && result.pages.length > 0 ? result.pages : null;
   const totalPages = pages ? pages.length : 1;
@@ -28,8 +35,8 @@ export default function ForensicsViewer() {
     '';
   const boundingBoxes = activePage?.bounding_boxes || result?.bounding_boxes || [];
 
-  // Reset bounding-box reveal and blend whenever the active page changes
-  // so each page's boxes animate in fresh after the scan bar completes.
+  // Reset bounding-box reveal whenever the active page changes so each
+  // page's boxes animate in fresh after the scan bar completes.
   useEffect(() => {
     setBoxesAnimated(0);
     if (!activePage || !boundingBoxes.length) return;
@@ -51,13 +58,24 @@ export default function ForensicsViewer() {
     });
   };
 
+  // FIX 4: ResizeObserver on the viewer container recomputes the SVG
+  // coordinate system whenever the layout changes (window resize, nav
+  // tabs wrapping on narrow viewports, parent grid reflowing, etc).
+  // Falls back to a plain window resize listener for very old browsers.
   useEffect(() => {
-    // Re-measure on page change and on window resize so SVG coordinates
-    // always match the currently-rendered image.
-    const onResize = () => measure();
-    window.addEventListener('resize', onResize);
     measure();
-    return () => window.removeEventListener('resize', onResize);
+    const onWinResize = () => measure();
+    window.addEventListener('resize', onWinResize);
+
+    let ro;
+    if (typeof ResizeObserver !== 'undefined' && containerRef.current) {
+      ro = new ResizeObserver(() => measure());
+      ro.observe(containerRef.current);
+    }
+    return () => {
+      window.removeEventListener('resize', onWinResize);
+      if (ro) ro.disconnect();
+    };
   }, [originalUrl]);
 
   if (status === 'error') {
@@ -125,12 +143,6 @@ export default function ForensicsViewer() {
   const goNext = () => hasNext && setCurrentPage(safeIndex + 1);
 
   const activeOverlayUrl = overlay === 'ela' ? elaHeatmapUrl : gradcamUrl;
-
-  // Compute bounding-box coordinates in rendered pixel space. Source
-  // coordinates are in the natural image dimensions; we scale them to
-  // whatever the img element is currently rendered at.
-  const scaleX = imgDims.naturalW > 0 ? imgDims.renderedW / imgDims.naturalW : 1;
-  const scaleY = imgDims.naturalH > 0 ? imgDims.renderedH / imgDims.naturalH : 1;
 
   return (
     <div className="doc-viewer fade-up" id="forensics-viewer-root">
@@ -224,7 +236,9 @@ export default function ForensicsViewer() {
         </div>
       </div>
 
-      <div className="doc-compare" style={{ position: 'relative' }}>
+      <div ref={containerRef}
+           className="doc-compare"
+           style={{ position: 'relative', aspectRatio: '3 / 2' }}>
         <div className="doc-labels">
           <span className="badge badge-cyan">ORIGINAL</span>
           <span className={`badge ${overlay === 'ela' ? 'badge-cyan' : 'badge-red'}`}>
@@ -254,10 +268,13 @@ export default function ForensicsViewer() {
             : <div className="skeleton skel-block" style={{ width: '70%', height: '80%' }} />}
         </div>
 
-        {/* Bounding-box overlay — always on top, visible in both views. */}
+        {/* Bounding-box overlay — always on top, visible in both views.
+            The SVG uses viewBox in natural-image space, so even as the
+            container reflows via ResizeObserver the box positions stay
+            correct without an explicit recompute. */}
         {imgDims.naturalW > 0 && imgDims.renderedW > 0 && boundingBoxes.length > 0 && (
           <svg
-            key={`bx-${safeIndex}`}
+            key={`bx-${safeIndex}-${imgDims.renderedW}x${imgDims.renderedH}`}
             aria-hidden="true"
             style={{
               position: 'absolute',
