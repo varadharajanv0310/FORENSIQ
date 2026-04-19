@@ -1695,3 +1695,183 @@ input[type="range"].range-red::-moz-range-thumb {
   .container { padding: 0 20px; }
   .batch-doc-chip { min-width: 180px; }
 }
+
+/* ============================================================
+   FIX 1 — Analyze / Verdict tab bar
+   Sticky sub-nav that sits directly below the main Navbar.
+   Active tab is underlined in cyan; locked tab (verdict before
+   a result exists) is muted and non-interactive.
+   ============================================================ */
+.analysis-tab-bar {
+  position: sticky;
+  top: 62px;             /* sits flush below the 62 px Navbar */
+  z-index: 40;
+  background: rgba(8, 11, 20, 0.94);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border-soft);
+}
+.analysis-tabs {
+  display: flex;
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 0 44px;
+}
+.analysis-tab {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 14px 22px;
+  cursor: pointer;
+  transition: color 0.18s, border-color 0.18s;
+  white-space: nowrap;
+}
+.analysis-tab:hover:not(.locked) { color: var(--text); }
+.analysis-tab.active {
+  color: var(--cyan);
+  border-bottom-color: var(--cyan);
+}
+.analysis-tab.locked {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.analysis-tab.locked:hover { color: var(--text-faint); }
+
+.verdict-back-wrap {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 14px 44px 0;
+}
+.verdict-back-btn {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 6px 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: color 0.18s;
+}
+.verdict-back-btn:hover { color: var(--cyan); }
+
+/* ============================================================
+   FIX 2 — Drag handle: make the circular handle interactive.
+   The base class has pointer-events:none; the draggable variant
+   overrides via inline style in ForensicsViewer.jsx.
+   No change to the base .divider-handle rule needed.
+   ============================================================ */
+/* Cursor hint shown while dragging even if mouse leaves the handle */
+.doc-compare.dragging { cursor: col-resize; user-select: none; }
+
+/* ============================================================
+   FIX 3 — GitHub CTA link (hero)
+   Styled identically to .cta so it fits the existing hero layout
+   without shifting anything.
+   ============================================================ */
+a.github-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 10px 20px;
+  border-radius: 100px;
+  background: linear-gradient(135deg, #7C4DFF 0%, #4FC3F7 100%);
+  color: white;
+  text-decoration: none;
+  font-weight: 500;
+  box-shadow: 0 0 24px rgba(124, 77, 255, 0.4), inset 0 1px 0 rgba(255,255,255,0.2);
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+a.github-cta:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 0 32px rgba(124, 77, 255, 0.6);
+}
+
+/* ============================================================
+   FIX 4 — Heatmap "Analyzing, please wait" placeholder
+   Replaces the generic skeleton while status === 'loading'.
+   A cyan scan line sweeps top-to-bottom over a dark background;
+   centred text and a three-dot pulse sit on top.
+   ============================================================ */
+.heatmap-analyzing-wrap {
+  background: #0A0D1A;
+  overflow: hidden;
+}
+
+.heatmap-scan-line {
+  position: absolute;
+  left: 0; right: 0;
+  top: 0;
+  height: 3px;
+  background: linear-gradient(90deg, transparent 0%, var(--cyan) 50%, transparent 100%);
+  box-shadow: 0 0 18px var(--cyan), 0 0 40px rgba(79, 195, 247, 0.4);
+  animation: heatmap-scan 2.4s ease-in-out infinite;
+  z-index: 2;
+  pointer-events: none;
+}
+@keyframes heatmap-scan {
+  0%   { top: 0%;   opacity: 0; }
+  5%   { opacity: 1; }
+  95%  { opacity: 1; }
+  100% { top: 100%; opacity: 0; }
+}
+
+.heatmap-analyzing-content {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  z-index: 3;
+  pointer-events: none;
+}
+.heatmap-analyzing-title {
+  font-family: var(--mono);
+  font-size: 13px;
+  letter-spacing: 0.18em;
+  color: var(--cyan);
+  text-transform: uppercase;
+  text-shadow: 0 0 20px rgba(79, 195, 247, 0.6);
+}
+.heatmap-analyzing-sub {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  color: var(--text-faint);
+  text-transform: uppercase;
+}
+.heatmap-analyzing-dots {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+.heatmap-analyzing-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--cyan);
+  opacity: 0.3;
+  animation: dot-pulse 1.4s ease-in-out infinite;
+}
+.heatmap-analyzing-dots span:nth-child(2) { animation-delay: 0.22s; }
+.heatmap-analyzing-dots span:nth-child(3) { animation-delay: 0.44s; }
+@keyframes dot-pulse {
+  0%, 80%, 100% { opacity: 0.2; transform: scale(0.85); }
+  40%           { opacity: 1;   transform: scale(1.15);
+                  box-shadow: 0 0 8px var(--cyan); }
+}

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useAnalysis } from '../context/AnalysisContext.jsx';
 import { resolveAssetUrl } from '../services/api.js';
 import { ErrorBanner } from './FX.jsx';
@@ -21,6 +21,40 @@ export default function ForensicsViewer() {
   const [boxesAnimated, setBoxesAnimated] = useState(0); // index-inclusive
   const imgRef = useRef(null);
   const containerRef = useRef(null);
+  const dragActiveRef = useRef(false);
+
+  // ── FIX 2: drag-on-image blend handle ────────────────────────────────
+  const handleDragStart = useCallback((e) => {
+    e.preventDefault();
+    dragActiveRef.current = true;
+  }, []);
+
+  const handleDragMove = useCallback((e) => {
+    if (!dragActiveRef.current || !containerRef.current) return;
+    if (e.cancelable) e.preventDefault();
+    const rect = containerRef.current.getBoundingClientRect();
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const pct = Math.max(2, Math.min(98, ((clientX - rect.left) / rect.width) * 100));
+    setBlend(Math.round(pct));
+  }, [setBlend]);
+
+  const handleDragEnd = useCallback(() => {
+    dragActiveRef.current = false;
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener('mousemove', handleDragMove);
+    window.addEventListener('mouseup', handleDragEnd);
+    window.addEventListener('touchmove', handleDragMove, { passive: false });
+    window.addEventListener('touchend', handleDragEnd);
+    return () => {
+      window.removeEventListener('mousemove', handleDragMove);
+      window.removeEventListener('mouseup', handleDragEnd);
+      window.removeEventListener('touchmove', handleDragMove);
+      window.removeEventListener('touchend', handleDragEnd);
+    };
+  }, [handleDragMove, handleDragEnd]);
+  // ─────────────────────────────────────────────────────────────────────
 
   const pages = Array.isArray(result?.pages) && result.pages.length > 0 ? result.pages : null;
   const totalPages = pages ? pages.length : 1;
@@ -121,15 +155,20 @@ export default function ForensicsViewer() {
         <div className="doc-header">
           <div>
             <div className="doc-title">{file?.name || 'Analyzing…'}</div>
-            <div className="doc-title"><small>Running ELA · CNN · GradCAM · Metadata</small></div>
+            <div className="doc-title"><small>Running ELA · CNN · GradCAM · Metadata · OCR</small></div>
           </div>
           <span className="badge badge-purple"><span className="dot dot-live" /> ANALYZING</span>
         </div>
-        <div className="doc-compare">
-          <div style={{ position: 'absolute', inset: 20, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <div className="skeleton skel-block" style={{ width: '70%', height: '80%' }} />
+        {/* FIX 4 — explicit analyzing placeholder replaces generic skeleton */}
+        <div className="doc-compare heatmap-analyzing-wrap" style={{ position: 'relative', aspectRatio: '3 / 2' }}>
+          <div className="heatmap-scan-line" />
+          <div className="heatmap-analyzing-content">
+            <div className="heatmap-analyzing-title">ANALYZING DOCUMENT</div>
+            <div className="heatmap-analyzing-sub">PLEASE WAIT…</div>
+            <div className="heatmap-analyzing-dots">
+              <span /><span /><span />
+            </div>
           </div>
-          <div className="scan-bar" />
         </div>
       </div>
     );
@@ -289,9 +328,20 @@ export default function ForensicsViewer() {
             {boundingBoxes.slice(0, 3).map((b, i) => {
               const visible = i < boxesAnimated;
               const conf = Math.round((b.confidence || 0) * 100);
-              const tagHeight = Math.max(28, imgDims.naturalH * 0.035);
-              const tagWidth = Math.max(180, imgDims.naturalW * 0.18);
-              const fontSize = Math.max(14, imgDims.naturalH * 0.018);
+              // Label geometry now scales with the BOX size (not just the
+              // image size). Small regions on low-res documents no longer
+              // get dwarfed by oversized "REGION A" labels — the tag is
+              // capped so it never exceeds the bounding box itself by more
+              // than ~40%, and font size shrinks on tight boxes.
+              const labelText = `${(b.label || `REGION ${String.fromCharCode(65 + i)}`).toUpperCase()} ${conf}%`;
+              const diag = Math.sqrt(imgDims.naturalW * imgDims.naturalW + imgDims.naturalH * imgDims.naturalH);
+              const fontSize = Math.max(8, Math.min(diag * 0.010, b.height * 0.55));
+              const tagHeight = Math.max(11, fontSize * 1.35);
+              const estTextWidth = labelText.length * fontSize * 0.55;
+              const tagWidth = Math.min(
+                Math.max(estTextWidth + 10, b.width),
+                imgDims.naturalW * 0.30,
+              );
               return (
                 <g key={`${safeIndex}-${i}`}
                    style={{
@@ -306,7 +356,7 @@ export default function ForensicsViewer() {
                     height={b.height}
                     fill="rgba(198,40,40,0.04)"
                     stroke="#FF2D2D"
-                    strokeWidth={Math.max(2, imgDims.naturalW * 0.0025)}
+                    strokeWidth={Math.max(1, Math.min(3, imgDims.naturalW * 0.0018))}
                     style={{ filter: 'drop-shadow(0 0 6px rgba(198,40,40,0.85))' }}
                   />
                   <g>
@@ -317,18 +367,18 @@ export default function ForensicsViewer() {
                       height={tagHeight}
                       fill="#080B14"
                       stroke="#FF2D2D"
-                      strokeWidth={Math.max(1, imgDims.naturalW * 0.0015)}
+                      strokeWidth={Math.max(0.75, Math.min(2, imgDims.naturalW * 0.0012))}
                     />
                     <text
-                      x={b.x + 10}
-                      y={b.y - tagHeight * 0.3}
+                      x={b.x + tagHeight * 0.35}
+                      y={b.y - tagHeight * 0.28}
                       fill="#FF8A80"
                       fontFamily="ui-monospace, 'IBM Plex Mono', 'Fira Code', monospace"
                       fontSize={fontSize}
                       fontWeight={600}
-                      letterSpacing="1.5"
+                      letterSpacing="1"
                     >
-                      {b.label?.toUpperCase() || `REGION ${String.fromCharCode(65 + i)}`} · {conf}%
+                      {labelText}
                     </text>
                   </g>
                 </g>
@@ -337,16 +387,21 @@ export default function ForensicsViewer() {
           </svg>
         )}
 
-        <div className="divider-handle" style={{ left: `${blend}%`, zIndex: 6 }} />
+        {/* FIX 2 — draggable handle; inline style overrides pointer-events:none from CSS */}
+        <div
+          className="divider-handle"
+          style={{ left: `${blend}%`, zIndex: 6, pointerEvents: 'auto', cursor: 'col-resize' }}
+          onMouseDown={handleDragStart}
+          onTouchStart={handleDragStart}
+          aria-label="Drag to adjust heatmap blend"
+          role="slider"
+          aria-valuenow={blend}
+          aria-valuemin={2}
+          aria-valuemax={98}
+        />
         <div className="scan-bar" />
       </div>
-
-      <div className="blend-slider">
-        <label>BLEND</label>
-        <input type="range" min="0" max="100" value={blend}
-               onChange={e => setBlend(+e.target.value)} />
-        <span className="blend-val">{blend}%</span>
-      </div>
+      {/* FIX 2 — bottom slider removed; blend is now controlled by dragging the on-image handle */}
     </div>
   );
 }

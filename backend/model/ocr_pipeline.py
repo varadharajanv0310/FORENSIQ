@@ -108,6 +108,11 @@ def run_ocr(image_path: str) -> Dict:
         log.exception("OCR pass 1 failed on %s", image_path)
         return _empty_result(error=f"OCR failed: {exc}")
 
+    # Cap lines to prevent CPU hang on dense documents (e.g. full-page scans
+    # with hundreds of text regions). 50 lines is sufficient for forensic
+    # glyph-metric analysis and keeps processing under ~3 s.
+    raw = raw[:50]
+
     first_text = " ".join([r[1] for r in raw]) if raw else ""
     script = detect_script(first_text)
 
@@ -119,7 +124,7 @@ def run_ocr(image_path: str) -> Dict:
             specific = _reader_for(script)
             raw2 = specific.readtext(image_path)
             if raw2:
-                raw = raw2
+                raw = raw2[:50]  # apply same cap to pass 2
         except Exception as exc:  # noqa: BLE001
             log.warning("OCR pass 2 for %s failed: %s", script, exc)
 

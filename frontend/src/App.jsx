@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import Navbar from './components/Navbar.jsx';
 import HeroSection from './components/HeroSection.jsx';
 import UploadZone from './components/UploadZone.jsx';
@@ -72,33 +72,70 @@ function VerdictBlock() {
   );
 }
 
-// FIX 3: merged analysis + verdict into a single scrollable container.
-// - When status !== 'success' we still show the analysis block so the
-//   user has a page to interact with during loading/error.
-// - When status === 'success' we render VerdictBlock immediately below,
-//   with an anchor so the "PROCEED" button can smooth-scroll to it.
-// - Whichever screen the user is on ('analysis' or 'verdict') renders
-//   the same unified layout; the 'verdict' screen just auto-scrolls to
-//   the anchor on mount so the Navbar tab still feels like it took the
-//   user somewhere.
+// Analyze / Verdict are now two distinct tab views rather than one
+// long scrollable page. The active tab is driven by local state but
+// stays in sync with the shared `screen` value so that Navbar
+// navigation and VerdictProceedAction both work without changes.
 function UnifiedScreen() {
-  const { screen, status } = useAnalysis();
+  const { screen, setScreen, status } = useAnalysis();
+  const [activeTab, setActiveTab] = useState('analyze');
 
+  // Sync tab when screen is changed externally (Navbar, VerdictProceedAction).
   useEffect(() => {
-    if (screen !== 'verdict') return;
-    if (status !== 'success') return;
-    // Run after paint so the anchor node definitely exists.
-    const t = setTimeout(() => {
-      const anchor = document.getElementById('verdict-anchor');
-      if (anchor) anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }, 40);
-    return () => clearTimeout(t);
+    if (screen === 'verdict' && status === 'success') {
+      setActiveTab('verdict');
+    } else if (screen === 'analysis') {
+      setActiveTab('analyze');
+    }
   }, [screen, status]);
+
+  const switchToVerdict = () => {
+    if (status !== 'success') return;
+    setActiveTab('verdict');
+    setScreen('verdict');
+  };
+
+  const switchToAnalyze = () => {
+    setActiveTab('analyze');
+    setScreen('analysis');
+  };
 
   return (
     <>
-      <AnalysisBlock />
-      {status === 'success' && <VerdictBlock />}
+      {/* ── Inline tab bar ── */}
+      <div className="analysis-tab-bar">
+        <div className="analysis-tabs">
+          <button
+            type="button"
+            className={`analysis-tab${activeTab === 'analyze' ? ' active' : ''}`}
+            onClick={switchToAnalyze}
+          >
+            ◈ ANALYZE
+          </button>
+          <button
+            type="button"
+            className={`analysis-tab${activeTab === 'verdict' ? ' active' : ''}${status !== 'success' ? ' locked' : ''}`}
+            onClick={switchToVerdict}
+            disabled={status !== 'success'}
+            title={status !== 'success' ? 'Run an analysis first to unlock the verdict' : undefined}
+          >
+            ◉ VERDICT{status !== 'success' ? ' · LOCKED' : ''}
+          </button>
+        </div>
+      </div>
+
+      {/* ── Tab content ── */}
+      {activeTab === 'analyze' && <AnalysisBlock />}
+      {activeTab === 'verdict' && status === 'success' && (
+        <>
+          <div className="verdict-back-wrap">
+            <button type="button" className="verdict-back-btn" onClick={switchToAnalyze}>
+              ← BACK TO ANALYZE
+            </button>
+          </div>
+          <VerdictBlock />
+        </>
+      )}
     </>
   );
 }

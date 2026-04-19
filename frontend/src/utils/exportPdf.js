@@ -233,28 +233,152 @@ async function drawHeatmap(doc, y, heatmapDataUrl) {
   return y + targetH + 12;
 }
 
-function drawOcr(doc, y, result) {
-  const rl = result?.regional_language;
-  if (!rl) return y;
-  const ocrText = rl.ocr_text || '';
-  if (!ocrText.trim()) return y;
+// ASCII-only sanitizer: jsPDF's default Courier is WinAnsi-only and will
+// turn Tamil / Devanagari / Telugu / etc. code points into mojibake
+// (e.g. "° ¿ ² ¾ • Í"). Gemini is instructed to return ASCII, but we
+// double-filter here so any accidental smart-quote or em-dash is safe too.
+function toAsciiSafe(text) {
+  if (!text) return '';
+  const replacements = {
+    '\u2018': "'", '\u2019': "'", '\u201C': '"', '\u201D': '"',
+    '\u2013': '-', '\u2014': '-', '\u2026': '...', '\u00A0': ' ',
+    '\u2022': '*', '\u00B7': '*',
+  };
+  let out = '';
+  for (const ch of text.normalize('NFKD')) {
+    const cp = ch.codePointAt(0);
+    if (cp < 0x80) { out += ch; continue; }
+    if (replacements[ch]) { out += replacements[ch]; continue; }
+    // Drop combining marks (category M*).
+    if (cp >= 0x0300 && cp <= 0x036F) continue;
+    // Keep only Latin-1 printable.
+    if (cp < 0x100) { out += ch; }
+    // else: dropped.
+  }
+  return out;
+}
+
+// Shared section renderer: header bar + body block, with correct
+// multi-page handling. Keeps the header attached to the first page of
+// its body, and splits long bodies across pages so each page shows a
+// proper "(continued)" chunk instead of leaving orphan headers behind.
+function drawSection(doc, y, title, body) {
   const w = doc.internal.pageSize.getWidth();
-  setText(doc, CYAN);
-  doc.setFont('courier', 'bold');
-  doc.setFontSize(10);
-  doc.text('OCR EXTRACT', 40, y);
-  y += 12;
-  setText(doc, DIM);
-  doc.setFontSize(8);
-  doc.text(`Script: ${rl.script || 'english'} · confidence ${Math.round((rl.confidence || 0) * 100)}%`, 40, y);
-  y += 12;
-  setText(doc, FG);
+  const pageH = doc.internal.pageSize.getHeight();
+  const margin = 40;
+  const contentW = w - margin * 2;
+  const lineH = 12;
+  const headerH = 14;
+  const topGap = 20;      // space between header bar and body top
+  const footerReserve = 60;
+
+  setText(doc, '#C8D2DC');
   doc.setFont('courier', 'normal');
   doc.setFontSize(9);
-  const lines = doc.splitTextToSize(ocrText.slice(0, 2000), w - 80);
-  doc.text(lines, 40, y);
-  y += lines.length * 10 + 8;
+  const allLines = doc.splitTextToSize(body || '', contentW - 12);
+  if (allLines.length === 0) return y;
+
+  // If the header plus at least four body lines won't fit, start this
+  // section on a fresh page so we never strand a lone header.
+  const minFirstPageH = headerH + topGap + lineH * 4 + 12;
+  if (y + minFirstPageH > pageH - footerReserve) {
+    doc.addPage();
+    fillPage(doc);
+    y = 60;
+  }
+
+  // How many body lines can fit on the CURRENT page alongside the header?
+  const spaceForBody = pageH - footerReserve - (y + topGap);
+  const linesThisPage = Math.max(
+    4,
+    Math.floor((spaceForBody - 12) / lineH),
+  );
+  const firstChunk = allLines.slice(0, linesThisPage);
+  const rest = allLines.slice(linesThisPage);
+
+  // Draw header bar.
+  setFill(doc, '#0F1522');
+  setDraw(doc, '#1f2a3a');
+  doc.setLineWidth(0.4);
+  doc.rect(margin, y - 2, contentW, headerH, 'FD');
+  setText(doc, CYAN);
+  doc.setFont('courier', 'bold');
+  doc.setFontSize(9);
+  doc.text(title, margin + 6, y + 8);
+  y += topGap;
+
+  // Draw first body chunk.
+  setText(doc, '#C8D2DC');
+  doc.setFont('courier', 'normal');
+  doc.setFontSize(9);
+  const firstBlockH = firstChunk.length * lineH + 12;
+  setFill(doc, '#080B14');
+  setDraw(doc, '#1f2a3a');
+  doc.setLineWidth(0.3);
+  doc.rect(margin, y - 4, contentW, firstBlockH, 'FD');
+  firstChunk.forEach((line, idx) => {
+    doc.text(line, margin + 6, y + 4 + idx * lineH);
+  });
+  y += firstBlockH + 10;
+
+  // Continuation pages, if body was longer than one page.
+  let remaining = rest;
+  while (remaining.length > 0) {
+    doc.addPage();
+    fillPage(doc);
+    y = 60;
+
+    // Continuation header
+    setFill(doc, '#0F1522');
+    setDraw(doc, '#1f2a3a');
+    doc.setLineWidth(0.4);
+    doc.rect(margin, y - 2, contentW, headerH, 'FD');
+    setText(doc, CYAN);
+    doc.setFont('courier', 'bold');
+    doc.setFontSize(9);
+    doc.text(`${title} (CONTINUED)`, margin + 6, y + 8);
+    y += topGap;
+
+    const availH = pageH - footerReserve - y;
+    const linesFit = Math.max(1, Math.floor((availH - 12) / lineH));
+    const chunk = remaining.slice(0, linesFit);
+    remaining = remaining.slice(linesFit);
+
+    const blockH = chunk.length * lineH + 12;
+    setText(doc, '#C8D2DC');
+    doc.setFont('courier', 'normal');
+    doc.setFontSize(9);
+    setFill(doc, '#080B14');
+    setDraw(doc, '#1f2a3a');
+    doc.setLineWidth(0.3);
+    doc.rect(margin, y - 4, contentW, blockH, 'FD');
+    chunk.forEach((line, idx) => {
+      doc.text(line, margin + 6, y + 4 + idx * lineH);
+    });
+    y += blockH + 10;
+  }
+
   return y;
+}
+
+function drawOcr(doc, y, result, ocrInsights) {
+  const rl = result?.regional_language;
+  if (!rl) return y;
+  const rawText = rl.ocr_text || '';
+  const hasInsights = !!(ocrInsights && ocrInsights.trim());
+  if (!rawText.trim() && !hasInsights) return y;
+
+  const body = hasInsights
+    ? toAsciiSafe(ocrInsights)
+    : toAsciiSafe(
+        `LANGUAGE: ${rl.language_name || rl.script || 'Unknown'} (script: ${rl.script || 'english'})\n` +
+        `CONFIDENCE: ${Math.round((rl.confidence || 0) * 100)}%\n\n` +
+        'AI OCR analysis unavailable. Raw extraction contained non-Latin text ' +
+        'that cannot be rendered in the PDF; view the Regional Forensics tab ' +
+        'in the browser for the original extraction.'
+      );
+
+  return drawSection(doc, y, 'OCR ANALYSIS', body);
 }
 
 function drawFooter(doc, result) {
@@ -288,6 +412,42 @@ function ensureRoom(doc, y, needed) {
 export async function exportReportPdf(result) {
   if (!result) return null;
 
+  // ── FIX 5: Gemini AI enrichment (PDF only — never shown in UI) ───────
+  // Two parallel passes:
+  //   /enrich       — 3-paragraph forensic summary of the verdict
+  //   /enrich/ocr   — ASCII-safe insights on the OCR extraction
+  //                   (language ID, transliteration, translation,
+  //                    observations) so the PDF never dumps raw
+  //                    non-Latin Unicode into jsPDF's WinAnsi font.
+  let enrichmentText = 'AI enrichment unavailable.';
+  let ocrInsights = '';
+  try {
+    const [enrichRes, ocrRes] = await Promise.all([
+      fetch('http://localhost:8000/enrich', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ result }),
+      }),
+      fetch('http://localhost:8000/enrich/ocr', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ result }),
+      }),
+    ]);
+    if (enrichRes && enrichRes.ok) {
+      const enrichData = await enrichRes.json();
+      enrichmentText = enrichData.enrichment || enrichmentText;
+    }
+    if (ocrRes && ocrRes.ok) {
+      const ocrData = await ocrRes.json();
+      ocrInsights = ocrData.enrichment || '';
+    }
+  } catch (_) {
+    // Backend offline or network error — silently use fallbacks.
+  }
+  enrichmentText = toAsciiSafe(enrichmentText);
+  // ─────────────────────────────────────────────────────────────────────
+
   const doc = new jsPDF({ unit: 'pt', format: 'a4' });
   fillPage(doc);
 
@@ -312,11 +472,20 @@ export async function exportReportPdf(result) {
   }
 
   const ocrText = result?.regional_language?.ocr_text || '';
-  if (ocrText.trim()) {
-    y = ensureRoom(doc, y, 120);
-    y = drawOcr(doc, y, result);
+  if (ocrText.trim() || ocrInsights.trim()) {
+    y = drawOcr(doc, y, result, ocrInsights);
   }
 
+  // ── FIX 5: AI Forensic Enrichment section ───────────────────────────
+  // drawSection handles its own header+body page-break so the header
+  // can never get stranded on a page with no content below it, and
+  // long enrichments cleanly span multiple pages with "(CONTINUED)"
+  // headers.
+  y = drawSection(doc, y, 'AI FORENSIC ENRICHMENT', enrichmentText);
+  // ─────────────────────────────────────────────────────────────────────
+
+  // Footer is drawn on whatever page we ended on — if drawSection
+  // added pages, the final one gets the footer.
   drawFooter(doc, result);
 
   const filename = safeFilename(result.filename);

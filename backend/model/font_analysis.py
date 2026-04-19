@@ -32,6 +32,10 @@ def analyze_fonts(image_path: str) -> Dict:
     mser.setMaxArea(int(0.05 * gray.shape[0] * gray.shape[1]))
 
     regions, _ = mser.detectRegions(gray)
+    # Cap regions to prevent KMeans stall on complex images (e.g. dense
+    # forms with thousands of blobs). 500 regions is more than enough for
+    # font-consistency scoring; the ratio-based score is largely scale-invariant.
+    regions = list(regions)[:500]
     total = len(regions)
     if total == 0:
         return {

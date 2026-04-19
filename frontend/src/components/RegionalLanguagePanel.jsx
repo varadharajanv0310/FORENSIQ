@@ -88,7 +88,10 @@ export default function RegionalLanguagePanel() {
   }
 
   const scriptKey = (rl.script || '').toLowerCase();
-  const scriptInfo = SCRIPT_NATIVE[scriptKey] || { native: scriptKey.toUpperCase() || '—', name: rl.script || 'Unknown' };
+  const scriptInfo = SCRIPT_NATIVE[scriptKey] || {
+    native: scriptKey.toUpperCase() || '—',
+    name: rl.language_name || rl.script || 'Unknown',
+  };
   const flaggedCount = rl.flagged_characters?.length || 0;
   const glyphCount = rl.glyph_count || charMap.length;
   const anomalyRate = glyphCount > 0 ? ((flaggedCount / glyphCount) * 100).toFixed(1) : '0.0';

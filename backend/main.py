@@ -18,6 +18,7 @@ Heatmap PNGs are written to ``static/heatmaps/`` and served under the
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import io
@@ -28,7 +29,15 @@ import shutil
 import time
 import traceback
 import uuid
+from functools import partial
 from typing import Dict, Optional
+
+# Load .env file so GEMINI_API_KEY and other secrets are available via os.environ
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+except ImportError:
+    pass  # python-dotenv optional; env vars can be set via OS
 
 import numpy as np
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -49,6 +58,8 @@ from model.gradcam import generate_gradcam as _raw_gradcam
 from model.inference import is_trained, predict as cnn_predict
 from model.metadata_check import check_metadata
 from model.ocr_pipeline import run_ocr
+from utils import gemini_ocr
+from utils.gemini_enrich import enrich_ocr, enrich_verdict
 from utils.report import (
     build_timeline,
     classify,
@@ -105,6 +116,49 @@ def health() -> Dict:
     return {"ok": True, "cnn_trained": is_trained()}
 
 
+def _to_python(obj):
+    """Recursively convert NumPy scalars / arrays to native Python types
+    so FastAPI's JSON serialiser never hits a TypeError."""
+    if isinstance(obj, dict):
+        return {k: _to_python(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_python(v) for v in obj]
+    if hasattr(obj, "item"):          # numpy scalar (np.float32, np.int64, …)
+        return obj.item()
+    if hasattr(obj, "tolist"):        # numpy array
+        return obj.tolist()
+    return obj
+
+
+class EnrichRequest(BaseModel):
+    result: dict = Field(..., description="Full analysis result object from /analyze.")
+
+
+@app.post("/enrich")
+def enrich(req: EnrichRequest):
+    """Generate an AI-written forensic report addendum via Gemini.
+    Returns plain text intended for PDF export only — never displayed in the UI."""
+    try:
+        text = enrich_verdict(req.result)
+        return {"enrichment": text}
+    except Exception as exc:  # noqa: BLE001
+        return {"enrichment": f"Enrichment unavailable: {exc}"}
+
+
+@app.post("/enrich/ocr")
+def enrich_ocr_endpoint(req: EnrichRequest):
+    """Specialized Gemini pass that analyses the OCR extraction and returns
+    ASCII-safe insights (language ID, transliteration, translation, forensic
+    observations). Used by the PDF exporter so Tamil/Hindi/Telugu text is
+    presented as actionable analysis instead of being dumped as raw Unicode
+    into jsPDF's WinAnsi-only Courier font (which produces mojibake)."""
+    try:
+        text = enrich_ocr(req.result)
+        return {"enrichment": text}
+    except Exception as exc:  # noqa: BLE001
+        return {"enrichment": f"OCR enrichment unavailable: {exc}"}
+
+
 @app.post("/analyze")
 async def analyze(file: UploadFile = File(...)) -> Dict:
     data = await file.read()
@@ -112,7 +166,12 @@ async def analyze(file: UploadFile = File(...)) -> Dict:
         raise HTTPException(status_code=400, detail="Empty file upload")
 
     filename = file.filename or f"upload_{uuid.uuid4().hex}.bin"
-    return _run_full_pipeline(data, filename)
+    # Run the CPU-bound pipeline in a thread-pool executor so the event
+    # loop is free to serve other requests (e.g. health-checks) while
+    # ELA / CNN / GradCAM / OCR are computing.
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, partial(_run_full_pipeline, data, filename))
+    return _to_python(result)
 
 
 class OcrRequest(BaseModel):
@@ -143,7 +202,15 @@ def ocr_only(req: OcrRequest):
         input_path = _save_upload(data, filename)
         image_path, _original_url, _page_info, _pages = _prepare_image(input_path, filename)
 
-        ocr = run_ocr(image_path)
+        ocr = None
+        if gemini_ocr.is_available():
+            ocr = gemini_ocr.run_gemini_ocr(image_path)
+            if ocr.get("error"):
+                log.warning("Gemini OCR failed (%s) — falling back to EasyOCR.", ocr["error"])
+                ocr = None
+        if ocr is None:
+            ocr = run_ocr(image_path)
+            ocr.setdefault("source", "easyocr")
         return {"regional_language": ocr}
     except HTTPException:
         raise
@@ -269,7 +336,18 @@ def _pipeline_from_image(image_path: str, original_url: str, filename: str,
     font = analyze_fonts(image_path)
     metadata = check_metadata(image_path if not is_pdf else filename_to_original(filename, image_path),
                               is_pdf=is_pdf)
-    ocr = run_ocr(image_path)
+    # OCR: try Gemini 2.5 Vision first (handles every script natively with
+    # no per-script model download). Fall back to EasyOCR on any failure so
+    # the regional panel stays populated even when the network is down.
+    ocr = None
+    if gemini_ocr.is_available():
+        ocr = gemini_ocr.run_gemini_ocr(image_path)
+        if ocr.get("error"):
+            log.warning("Gemini OCR failed (%s) — falling back to EasyOCR.", ocr["error"])
+            ocr = None
+    if ocr is None:
+        ocr = run_ocr(image_path)
+        ocr.setdefault("source", "easyocr")
 
     signals = {
         "ela":      {"score": ela["score"], "confidence": ela["confidence"],

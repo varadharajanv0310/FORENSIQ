@@ -10,3 +10,5 @@ PyMuPDF>=1.24.10
 torch>=2.6.0
 torchvision>=0.21.0
 easyocr>=1.7.1
+google-genai
+python-dotenv
